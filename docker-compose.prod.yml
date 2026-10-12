@@ -1,0 +1,125 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_OWNER}
+      POSTGRES_PASSWORD: ${POSTGRES_OWNER_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init-production.sh:/docker-entrypoint-initdb.d/00-init-production.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_OWNER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["sh","-c","exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    env_file: .env.production
+    volumes: [redisdata:/data]
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
+
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    env_file: .env.production
+    volumes: [miniodata:/data]
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
+
+  # Local inference only. Keep this service on the internal backend network;
+  # do not publish its port to the host or public edge network.
+  ollama:
+    image: ollama/ollama:0.12.6
+    restart: unless-stopped
+    volumes: [ollamadata:/root/.ollama]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    security_opt: ["no-new-privileges:true"]
+
+  migrate:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.prod
+    env_file: .env.production
+    environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL}
+    command: ["alembic","upgrade","head"]
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [backend]
+    restart: "no"
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.prod
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HF_HOME: /models/huggingface
+    volumes: [modelcache:/models/huggingface]
+    restart: unless-stopped
+    env_file: .env.production
+    command: ["gunicorn","app.main:app","-k","uvicorn.workers.UvicornWorker","--bind","0.0.0.0:8000","--workers","4","--timeout","60","--access-logfile","-"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_started}
+      minio: {condition: service_started}
+      ollama: {condition: service_healthy}
+    expose: ["8000"]
+    networks: [backend, edge]
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_API_URL: /api/v1
+    restart: unless-stopped
+    expose: ["3000"]
+    networks: [edge]
+    security_opt: ["no-new-privileges:true"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports: ["80:80","443:443"]
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./infra/nginx/certs:/etc/nginx/certs:ro
+    depends_on: [api,web]
+    networks: [edge]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  # A host firewall must restrict outbound traffic after model provisioning.
+  # Ollama needs outbound access only during the explicit model-pull step.
+  backend:
+  edge:
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  ollamadata:
+  modelcache:

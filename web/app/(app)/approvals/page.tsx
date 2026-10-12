@@ -1,0 +1,7 @@
+"use client";
+import {useEffect,useState} from "react";import {api} from "@/lib/api";
+export default function Approvals(){
+ const [rows,setRows]=useState<any[]>([]),[err,setErr]=useState("");const load=()=>api<any[]>("/agents").then(setRows).catch(e=>setErr(e.message));useEffect(() => { load(); }, []);
+ async function decide(id:string,action:string){try{await api(`/agents/${id}/${action}`,{method:"POST",body:JSON.stringify({note:`${action} via console clinique`})});load()}catch(e:any){setErr(e.message)}}
+ return <><div className="eyebrow">Human in the loop</div><h1 className="title">Validations IA</h1><p className="muted">Aucune action proposée par un agent n'est exécutée silencieusement.</p>{err&&<p className="error">{err}</p>}<div className="tablewrap"><table><thead><tr><th>Action</th><th>Patient</th><th>Statut</th><th>Payload</th><th>Décision</th></tr></thead><tbody>{rows.map(x=><tr key={x.id}><td><b>{x.action}</b></td><td>{x.patient_id.slice(0,8)}…</td><td><span className={x.status==="pending_approval"?"badge warn":"badge"}>{x.status}</span></td><td><code>{JSON.stringify(x.payload)}</code></td><td>{x.status==="pending_approval"&&<div style={{display:"flex",gap:6}}><button className="btn primary" onClick={()=>decide(x.id,"approve")}>Approuver</button><button className="btn danger" onClick={()=>decide(x.id,"reject")}>Rejeter</button></div>}</td></tr>)}</tbody></table></div></>
+}
